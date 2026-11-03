@@ -239,7 +239,7 @@ fi
 mkdir -p "$CONFIG_DIR"
 cat > "$CONFIG_PATH" <<CONFIGEOF
 {
-  "\$schema": "https://neusis.ai/config.json",
+  "\$schema": "https://docs.neusis.ai/config.json",
   "model": "neusiscode/auto",
   "provider": {
     "neusiscode": {

@@ -228,7 +228,7 @@ New-Item -ItemType Directory -Force -Path $ConfigDir | Out-Null
 
 $NL = [Environment]::NewLine
 $Config  = '{' + $NL
-$Config += '  "$schema": "https://neusis.ai/config.json",' + $NL
+$Config += '  "$schema": "https://docs.neusis.ai/config.json",' + $NL
 $Config += '  "model": "neusiscode/auto",' + $NL
 $Config += '  "provider": {' + $NL
 $Config += '    "neusiscode": {' + $NL
