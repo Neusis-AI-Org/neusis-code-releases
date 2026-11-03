@@ -129,6 +129,31 @@ try {
 }
 Write-Ok "Downloaded"
 
+# Verify the archive against the release's SHA256SUMS.txt before installing it.
+$SumsTmp = Join-Path $env:TEMP "neusiscode-$([System.IO.Path]::GetRandomFileName()).sha256"
+try {
+    Invoke-Download -Uri "https://github.com/$Repo/releases/download/v$Latest/SHA256SUMS.txt" -OutFile $SumsTmp
+} catch {
+    Remove-Item $Tmp -ErrorAction SilentlyContinue
+    Write-Fatal "Could not download SHA256SUMS.txt for v$Latest."
+}
+$Expected = $null
+foreach ($Line in (Get-Content -Path $SumsTmp)) {
+    $Parts = $Line.Trim() -split '\s+', 2
+    if ($Parts.Count -eq 2 -and $Parts[1].TrimStart('*') -eq $Archive) { $Expected = $Parts[0].ToLowerInvariant(); break }
+}
+Remove-Item $SumsTmp -ErrorAction SilentlyContinue
+if (-not $Expected) {
+    Remove-Item $Tmp -ErrorAction SilentlyContinue
+    Write-Fatal "SHA256SUMS.txt for v$Latest has no entry for $Archive."
+}
+$Actual = (Get-FileHash -Path $Tmp -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($Actual -ne $Expected) {
+    Remove-Item $Tmp -ErrorAction SilentlyContinue
+    Write-Fatal "Checksum mismatch for $Archive (expected $Expected, got $Actual). Not installing."
+}
+Write-Ok "Checksum verified"
+
 # Step 3 — install binary
 Write-Step "Install"; Write-Host ""
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null

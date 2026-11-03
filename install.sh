@@ -70,7 +70,7 @@ detect_platform() {
 
 fetch() {
     if command -v curl &>/dev/null; then
-        curl -sf "$1"
+        curl -sfL "$1"
     elif command -v wget &>/dev/null; then
         wget -q -O- "$1"
     else
@@ -139,6 +139,21 @@ trap 'rm -f "$TMP"' EXIT
 detail "${ARCHIVE}"
 download "$URL" "$TMP" || fatal "Download failed. Manual download: https://github.com/${REPO}/releases"
 ok "Downloaded"
+
+# Verify the archive against the release's SHA256SUMS.txt before installing it.
+SUMS="$(fetch "https://github.com/${REPO}/releases/download/v${LATEST}/SHA256SUMS.txt")" \
+    || fatal "Could not download SHA256SUMS.txt for v${LATEST}."
+EXPECTED="$(printf '%s\n' "$SUMS" | awk -v f="$ARCHIVE" '$2 == f || $2 == "*" f { print $1; exit }')"
+[ -n "$EXPECTED" ] || fatal "SHA256SUMS.txt for v${LATEST} has no entry for ${ARCHIVE}."
+if command -v sha256sum &>/dev/null; then
+    ACTUAL="$(sha256sum "$TMP" | awk '{ print $1 }')"
+elif command -v shasum &>/dev/null; then
+    ACTUAL="$(shasum -a 256 "$TMP" | awk '{ print $1 }')"
+else
+    fatal "sha256sum or shasum is required to verify the download."
+fi
+[ "$ACTUAL" = "$EXPECTED" ] || fatal "Checksum mismatch for ${ARCHIVE} (expected ${EXPECTED}, got ${ACTUAL}). Not installing."
+ok "Checksum verified"
 
 # Step 3 — install binary
 step "Install"; echo ""
