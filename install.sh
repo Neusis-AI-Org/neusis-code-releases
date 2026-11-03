@@ -2,8 +2,15 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Neusis Code Installer
 #
-# curl -fsSL https://get.neusis.ai/install.sh | sh
+# curl -fsSL https://get.neusis.ai/install.sh | bash
 # ─────────────────────────────────────────────────────────────────────────────
+
+# This script needs bash. Piped to `sh` it runs under dash on Debian and Ubuntu, which cannot parse it.
+# Keep this check POSIX and above the first bash-only line.
+if [ -z "${BASH_VERSION:-}" ]; then
+    echo "The Neusis Code installer needs bash. Run:  curl -fsSL https://get.neusis.ai/install.sh | bash" >&2
+    exit 1
+fi
 
 set -euo pipefail
 
