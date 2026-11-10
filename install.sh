@@ -186,20 +186,96 @@ else
     ok "Added to PATH  →${UPDATED}"
 fi
 
-# Step 5 — config (always write latest format, preserve secrets if they exist)
+# Step 5 — config. The installer sets only its own settings ($schema, the API key, the default model, the registry,
+# disabled_providers and the neusis-neuron server) and keeps everything else in the file. The binary just installed
+# reads and writes the JSONC as Bun (BUN_BE_BUN=1), so no jq, python or node is needed. Secrets reach it through the
+# environment, and it runs from the install dir with --no-env-file, so nothing in the current directory applies.
+IFS= read -r -d '' CONFIG_JS <<'JS' || true
+// Reads or updates ~/.config/neusiscode/neusiscode.json. Run by the neusiscode binary as Bun (BUN_BE_BUN=1).
+// read: prints one installer-owned value (NEUSIS_CONFIG_FIELD). write: sets the installer-owned settings and keeps
+// everything else; prints created, updated (previous file saved as .bak) or unchanged (file not touched).
+const fs = require("node:fs")
+const env = process.env
+const file = env.NEUSIS_CONFIG_PATH
+const text = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : ""
+const body = text.replace(/^﻿/, "")
+// Bun.JSONC.parse ignores anything after the first value, which neusiscode rejects. The extra array element makes
+// such content (a pasted second object, a stray brace or comma) an error, so those files take the fallback.
+const values = body.trim() ? Bun.JSONC.parse(`[${body}\n,0]`) : [{}, 0]
+if (values.length !== 2) throw new Error("unexpected content after the config object")
+const config = values[0]
+const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value)
+if (!isObject(config)) throw new Error("the config is not a JSON object")
+const neuron = isObject(config.mcp) && isObject(config.mcp["neusis-neuron"]) ? config.mcp["neusis-neuron"] : undefined
+if (env.NEUSIS_CONFIG_MODE === "read") {
+  const command = Array.isArray(neuron?.command) ? neuron.command : []
+  const at = command.findIndex((arg) => arg === "--kb-repo" || String(arg).startsWith("--kb-repo="))
+  const value = {
+    apiKey: config.provider?.neusiscode?.options?.apiKey,
+    kbRepo: at < 0 ? undefined : command[at] === "--kb-repo" ? command[at + 1] : command[at].slice("--kb-repo=".length),
+    pat: neuron?.environment?.GITHUB_PERSONAL_ACCESS_TOKEN,
+    hasNeuron: neuron ? "yes" : undefined,
+  }[env.NEUSIS_CONFIG_FIELD]
+  process.stdout.write(typeof value === "string" ? value : "")
+} else {
+  const SCHEMA = "https://docs.neusis.ai/config.json"
+  const before = JSON.stringify(config)
+  const merged = "$schema" in config ? config : { $schema: SCHEMA, ...config }
+  merged.$schema = SCHEMA
+  merged.model ??= "neusiscode/auto"
+  const child = (parent, key) => (isObject(parent[key]) ? parent[key] : (parent[key] = {}))
+  if (env.NEUSIS_API_KEY) child(child(child(merged, "provider"), "neusiscode"), "options").apiKey = env.NEUSIS_API_KEY
+  merged.registry ??= { repos: [{ url: "https://github.com/Neusis-AI-Org/neusiscode-registry" }] }
+  const disabled = Array.isArray(merged.disabled_providers) ? merged.disabled_providers : []
+  for (const id of ["opencode", "github-copilot"]) if (!disabled.includes(id)) disabled.push(id)
+  merged.disabled_providers = disabled
+  // An existing neusis-neuron entry is the user's: the installer only adds one.
+  if (env.NEUSIS_KB_REPO && !neuron) {
+    child(merged, "mcp")["neusis-neuron"] = {
+      type: "local",
+      command: ["neusis-neuron-mcp", "stdio", "--kb-repo", env.NEUSIS_KB_REPO],
+      ...(env.NEUSIS_NEURON_PAT ? { environment: { GITHUB_PERSONAL_ACCESS_TOKEN: env.NEUSIS_NEURON_PAT } } : {}),
+      enabled: true,
+    }
+  }
+  if (text.trim() && JSON.stringify(merged) === before) {
+    process.stdout.write("unchanged")
+  } else {
+    if (text.trim()) fs.copyFileSync(file, `${file}.bak`)
+    // The file holds the API key: owner-only when created.
+    fs.writeFileSync(file, `${JSON.stringify(merged, null, 2)}\n`, { mode: 0o600 })
+    process.stdout.write(text.trim() ? "updated" : "created")
+  }
+}
+JS
+
+config_js() {
+    (cd "$INSTALL_DIR" && BUN_BE_BUN=1 NEUSIS_CONFIG_PATH="$CONFIG_PATH" NEUSIS_CONFIG_MODE="$1" \
+        NEUSIS_CONFIG_FIELD="${2:-}" NEUSIS_API_KEY="${API_KEY:-}" NEUSIS_KB_REPO="${KB_REPO:-}" \
+        NEUSIS_NEURON_PAT="${NEURON_PAT:-}" "$BINARY" --no-env-file -e "$CONFIG_JS")
+}
+
 step "Configuration"; echo ""
 API_KEY=""
 KB_REPO=""
 NEURON_PAT=""
+HAS_NEURON=""
 if [ -f "$CONFIG_PATH" ]; then
-    # `|| true` is required: under `set -euo pipefail` on Apple's /bin/bash
-    # (3.2.57), a no-match grep makes the pipeline exit 1, errexit fires on
-    # the assignment, and the script silently exits at step 5. The KB_REPO
-    # and NEURON_PAT lookups DO miss on every config written by v0.1.5 or
-    # earlier (no mcp block) — that's the v0.1.6 install regression.
-    API_KEY="$(grep -o '"apiKey"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_PATH" 2>/dev/null | head -1 | sed 's/.*"apiKey"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' || true)"
-    KB_REPO="$(grep -o '"--kb-repo"[[:space:]]*,[[:space:]]*"[^"]*"' "$CONFIG_PATH" 2>/dev/null | head -1 | sed 's/.*"--kb-repo"[[:space:]]*,[[:space:]]*"\([^"]*\)".*/\1/' || true)"
-    NEURON_PAT="$(grep -o '"GITHUB_PERSONAL_ACCESS_TOKEN"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_PATH" 2>/dev/null | head -1 | sed 's/.*"GITHUB_PERSONAL_ACCESS_TOKEN"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' || true)"
+    if API_KEY="$(config_js read apiKey 2>/dev/null)"; then
+        KB_REPO="$(config_js read kbRepo 2>/dev/null || true)"
+        NEURON_PAT="$(config_js read pat 2>/dev/null || true)"
+        HAS_NEURON="$(config_js read hasNeuron 2>/dev/null || true)"
+    else
+        # Not valid JSONC: match the values instead, so they survive the rewrite below.
+        # `|| true` is required: under `set -euo pipefail` on Apple's /bin/bash
+        # (3.2.57), a no-match grep makes the pipeline exit 1, errexit fires on
+        # the assignment, and the script silently exits at step 5. The KB_REPO
+        # and NEURON_PAT lookups DO miss on every config written by v0.1.5 or
+        # earlier (no mcp block) — that's the v0.1.6 install regression.
+        API_KEY="$(grep -o '"apiKey"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_PATH" 2>/dev/null | head -1 | sed 's/.*"apiKey"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' || true)"
+        KB_REPO="$(grep -o '"--kb-repo"[[:space:]]*,[[:space:]]*"[^"]*"' "$CONFIG_PATH" 2>/dev/null | head -1 | sed 's/.*"--kb-repo"[[:space:]]*,[[:space:]]*"\([^"]*\)".*/\1/' || true)"
+        NEURON_PAT="$(grep -o '"GITHUB_PERSONAL_ACCESS_TOKEN"[[:space:]]*:[[:space:]]*"[^"]*"' "$CONFIG_PATH" 2>/dev/null | head -1 | sed 's/.*"GITHUB_PERSONAL_ACCESS_TOKEN"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' || true)"
+    fi
 fi
 if [ -z "$API_KEY" ]; then
     divider
@@ -211,8 +287,9 @@ if [ -z "$API_KEY" ]; then
 fi
 
 # Project Brain — optional neusis-neuron MCP knowledge-base integration.
-# kb-repo is per-project, so this is an opt-in prompt; blank skips it entirely.
-if [ -z "$KB_REPO" ]; then
+# kb-repo is per-project, so this is an opt-in prompt; blank skips it entirely. A neusis-neuron entry the
+# installer cannot read the repo from (another flag form, or the repo set in its environment) is left alone.
+if [ -z "$KB_REPO" ] && [ -z "$HAS_NEURON" ]; then
     divider
     printf "${WHITE}  Project Brain ${GRAY}(optional)${NC}\n\n"
     printf "${GRAY}  Connect a project-brain knowledge-base repo for richer context.${NC}\n"
@@ -240,15 +317,28 @@ if [ -n "${KB_REPO:-}" ]; then
     fi
 fi
 
-# Build the optional mcp.neusis-neuron block (omitted entirely when no KB repo).
-MCP_BLOCK=""
-if [ -n "${KB_REPO:-}" ]; then
-    NEURON_ENV=""
-    if [ -n "${NEURON_PAT:-}" ]; then
-        NEURON_ENV="
-      \"environment\": { \"GITHUB_PERSONAL_ACCESS_TOKEN\": \"$NEURON_PAT\" },"
+mkdir -p "$CONFIG_DIR"
+if CONFIG_RESULT="$(config_js write 2>/dev/null)"; then
+    case "$CONFIG_RESULT" in
+        unchanged) ok "Configuration up to date" ;;
+        updated)   ok "Configuration updated"; detail "Your other settings are kept; the previous file is ${CONFIG_PATH}.bak" ;;
+        *)         ok "Configuration saved" ;;
+    esac
+else
+    # Not valid JSONC, or the binary could not run: keep a copy and write the installer's settings alone.
+    if [ -f "$CONFIG_PATH" ]; then
+        cp -p "$CONFIG_PATH" "${CONFIG_PATH}.bak"
+        warn "Could not read ${CONFIG_PATH}; saved it as ${CONFIG_PATH}.bak. Copy your own settings back from there."
     fi
-    MCP_BLOCK=",
+    # Build the optional mcp.neusis-neuron block (omitted entirely when no KB repo).
+    MCP_BLOCK=""
+    if [ -n "${KB_REPO:-}" ]; then
+        NEURON_ENV=""
+        if [ -n "${NEURON_PAT:-}" ]; then
+            NEURON_ENV="
+      \"environment\": { \"GITHUB_PERSONAL_ACCESS_TOKEN\": \"$NEURON_PAT\" },"
+        fi
+        MCP_BLOCK=",
   \"mcp\": {
     \"neusis-neuron\": {
       \"type\": \"local\",
@@ -256,10 +346,11 @@ if [ -n "${KB_REPO:-}" ]; then
       \"enabled\": true
     }
   }"
-fi
+    fi
 
-mkdir -p "$CONFIG_DIR"
-cat > "$CONFIG_PATH" <<CONFIGEOF
+    OLD_UMASK="$(umask)"
+    umask 077
+    cat > "$CONFIG_PATH" <<CONFIGEOF
 {
   "\$schema": "https://docs.neusis.ai/config.json",
   "model": "neusiscode/auto",
@@ -276,7 +367,12 @@ cat > "$CONFIG_PATH" <<CONFIGEOF
   "disabled_providers": ["opencode", "github-copilot"]${MCP_BLOCK}
 }
 CONFIGEOF
-ok "Configuration saved"
+    umask "$OLD_UMASK"
+    ok "Configuration saved"
+fi
+# The file holds the API key and any GitHub token: owner-only, including files from earlier installers.
+chmod 600 "$CONFIG_PATH" 2>/dev/null || true
+[ -f "${CONFIG_PATH}.bak" ] && chmod 600 "${CONFIG_PATH}.bak" 2>/dev/null || true
 detail "$CONFIG_PATH"
 [ -n "${KB_REPO:-}" ] && detail "project-brain bound to $KB_REPO (per-project override: .neusiscode/neusiscode.jsonc)"
 
