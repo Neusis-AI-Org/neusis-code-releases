@@ -119,22 +119,12 @@ Write-Step "Download"; Write-Host ""
 $Arch    = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
 $Archive = "neusiscode-windows-$Arch.zip"
 $Url     = "https://github.com/$Repo/releases/download/v$Latest/$Archive"
-$Tmp     = Join-Path $env:TEMP "neusiscode-$([System.IO.Path]::GetRandomFileName()).zip"
 
-Write-Detail $Archive
-try {
-    Invoke-Download -Uri $Url -OutFile $Tmp
-} catch {
-    Write-Fatal "Download failed. Manual download: https://github.com/$Repo/releases"
-}
-Write-Ok "Downloaded"
-
-# Verify the archive against the release's SHA256SUMS.txt before installing it.
+# SHA256SUMS.txt lists every archive in the release, so a platform without a build stops here.
 $SumsTmp = Join-Path $env:TEMP "neusiscode-$([System.IO.Path]::GetRandomFileName()).sha256"
 try {
     Invoke-Download -Uri "https://github.com/$Repo/releases/download/v$Latest/SHA256SUMS.txt" -OutFile $SumsTmp
 } catch {
-    Remove-Item $Tmp -ErrorAction SilentlyContinue
     Write-Fatal "Could not download SHA256SUMS.txt for v$Latest."
 }
 $Expected = $null
@@ -144,9 +134,19 @@ foreach ($Line in (Get-Content -Path $SumsTmp)) {
 }
 Remove-Item $SumsTmp -ErrorAction SilentlyContinue
 if (-not $Expected) {
-    Remove-Item $Tmp -ErrorAction SilentlyContinue
-    Write-Fatal "SHA256SUMS.txt for v$Latest has no entry for $Archive."
+    Write-Fatal "No Neusis Code build for windows-$Arch yet. To request one, open an issue: https://github.com/$Repo/issues/new"
 }
+
+$Tmp = Join-Path $env:TEMP "neusiscode-$([System.IO.Path]::GetRandomFileName()).zip"
+Write-Detail $Archive
+try {
+    Invoke-Download -Uri $Url -OutFile $Tmp
+} catch {
+    Write-Fatal "Download failed. Manual download: https://github.com/$Repo/releases"
+}
+Write-Ok "Downloaded"
+
+# Verify the archive against the checksum read above before installing it.
 $Actual = (Get-FileHash -Path $Tmp -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($Actual -ne $Expected) {
     Remove-Item $Tmp -ErrorAction SilentlyContinue
