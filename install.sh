@@ -134,17 +134,20 @@ fi
 step "Download"; echo ""
 ARCHIVE="neusiscode-${OS_TAG}-${ARCH_TAG}.${EXT}"
 URL="https://github.com/${REPO}/releases/download/v${LATEST}/${ARCHIVE}"
+
+# SHA256SUMS.txt lists every archive in the release, so a platform without a build stops here.
+SUMS="$(fetch "https://github.com/${REPO}/releases/download/v${LATEST}/SHA256SUMS.txt")" \
+    || fatal "Could not download SHA256SUMS.txt for v${LATEST}."
+EXPECTED="$(printf '%s\n' "$SUMS" | awk -v f="$ARCHIVE" '$2 == f || $2 == "*" f { print $1; exit }')"
+[ -n "$EXPECTED" ] || fatal "No Neusis Code build for ${OS_TAG}-${ARCH_TAG} yet. To request one, open an issue: https://github.com/${REPO}/issues/new"
+
 TMP="$(mktemp /tmp/neusiscode-XXXXXX)"
 trap 'rm -f "$TMP"' EXIT
 detail "${ARCHIVE}"
 download "$URL" "$TMP" || fatal "Download failed. Manual download: https://github.com/${REPO}/releases"
 ok "Downloaded"
 
-# Verify the archive against the release's SHA256SUMS.txt before installing it.
-SUMS="$(fetch "https://github.com/${REPO}/releases/download/v${LATEST}/SHA256SUMS.txt")" \
-    || fatal "Could not download SHA256SUMS.txt for v${LATEST}."
-EXPECTED="$(printf '%s\n' "$SUMS" | awk -v f="$ARCHIVE" '$2 == f || $2 == "*" f { print $1; exit }')"
-[ -n "$EXPECTED" ] || fatal "SHA256SUMS.txt for v${LATEST} has no entry for ${ARCHIVE}."
+# Verify the archive against the checksum read above before installing it.
 if command -v sha256sum &>/dev/null; then
     ACTUAL="$(sha256sum "$TMP" | awk '{ print $1 }')"
 elif command -v shasum &>/dev/null; then
