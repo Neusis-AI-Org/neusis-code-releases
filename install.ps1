@@ -22,7 +22,6 @@ $ConfigDir   = Join-Path $env:USERPROFILE '.config\neusiscode'
 $ConfigPath  = Join-Path $ConfigDir 'neusiscode.json'
 $Repo        = 'Neusis-AI-Org/neusis-code-releases'
 $GitHubAPI   = "https://api.github.com/repos/$Repo/releases/latest"
-$NeuronUrl   = 'https://neusis-ai-org.github.io/neusis-neuron-releases/install.ps1'
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 
@@ -175,9 +174,9 @@ if (($UserPath -split ';') -contains $InstallDir) {
 }
 
 # Step 5 — config. The installer sets only its own settings ($schema, the API key, the default model, the
-# registry, disabled_providers and the neusis-neuron server) and keeps everything else in the file. The binary just
-# installed reads and writes the JSONC as Bun (BUN_BE_BUN=1), so nothing else is needed. Secrets reach it through the
-# environment, and it runs from the install dir with --no-env-file, so nothing in the current directory applies.
+# registry and disabled_providers) and keeps everything else in the file. The binary just installed reads and writes
+# the JSONC as Bun (BUN_BE_BUN=1), so nothing else is needed. Secrets reach it through the environment, and it runs
+# from the install dir with --no-env-file, so nothing in the current directory applies.
 $ConfigJs = @'
 // Reads or updates ~/.config/neusiscode/neusiscode.json. Run by the neusiscode binary as Bun (BUN_BE_BUN=1).
 // read: prints one installer-owned value (NEUSIS_CONFIG_FIELD). write: sets the installer-owned settings and keeps
@@ -194,15 +193,9 @@ if (values.length !== 2) throw new Error("unexpected content after the config ob
 const config = values[0]
 const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value)
 if (!isObject(config)) throw new Error("the config is not a JSON object")
-const neuron = isObject(config.mcp) && isObject(config.mcp["neusis-neuron"]) ? config.mcp["neusis-neuron"] : undefined
 if (env.NEUSIS_CONFIG_MODE === "read") {
-  const command = Array.isArray(neuron?.command) ? neuron.command : []
-  const at = command.findIndex((arg) => arg === "--kb-repo" || String(arg).startsWith("--kb-repo="))
   const value = {
     apiKey: config.provider?.neusiscode?.options?.apiKey,
-    kbRepo: at < 0 ? undefined : command[at] === "--kb-repo" ? command[at + 1] : command[at].slice("--kb-repo=".length),
-    pat: neuron?.environment?.GITHUB_PERSONAL_ACCESS_TOKEN,
-    hasNeuron: neuron ? "yes" : undefined,
   }[env.NEUSIS_CONFIG_FIELD]
   process.stdout.write(typeof value === "string" ? value : "")
 } else {
@@ -217,15 +210,6 @@ if (env.NEUSIS_CONFIG_MODE === "read") {
   const disabled = Array.isArray(merged.disabled_providers) ? merged.disabled_providers : []
   for (const id of ["opencode", "github-copilot"]) if (!disabled.includes(id)) disabled.push(id)
   merged.disabled_providers = disabled
-  // An existing neusis-neuron entry is the user's: the installer only adds one.
-  if (env.NEUSIS_KB_REPO && !neuron) {
-    child(merged, "mcp")["neusis-neuron"] = {
-      type: "local",
-      command: ["neusis-neuron-mcp", "stdio", "--kb-repo", env.NEUSIS_KB_REPO],
-      ...(env.NEUSIS_NEURON_PAT ? { environment: { GITHUB_PERSONAL_ACCESS_TOKEN: env.NEUSIS_NEURON_PAT } } : {}),
-      enabled: true,
-    }
-  }
   if (text.trim() && JSON.stringify(merged) === before) {
     process.stdout.write("unchanged")
   } else {
@@ -246,8 +230,6 @@ function Invoke-ConfigJs([string]$Mode, [string]$Field = '') {
         NEUSIS_CONFIG_MODE  = $Mode
         NEUSIS_CONFIG_FIELD = $Field
         NEUSIS_API_KEY      = $ApiKey
-        NEUSIS_KB_REPO      = $KbRepo
-        NEUSIS_NEURON_PAT   = $NeuronPat
     }
     $Previous = @{}
     $Pushed   = $false
@@ -280,23 +262,15 @@ function Invoke-ConfigJs([string]$Mode, [string]$Field = '') {
     }
 }
 
-$ApiKey    = ''
-$KbRepo    = ''
-$NeuronPat = ''
-$HasNeuron = ''
+$ApiKey = ''
 if (Test-Path $ConfigPath) {
     $Read = Invoke-ConfigJs 'read' 'apiKey'
     if ($null -ne $Read) {
-        $ApiKey    = $Read
-        $KbRepo    = [string](Invoke-ConfigJs 'read' 'kbRepo')
-        $NeuronPat = [string](Invoke-ConfigJs 'read' 'pat')
-        $HasNeuron = [string](Invoke-ConfigJs 'read' 'hasNeuron')
+        $ApiKey = $Read
     } else {
-        # Not valid JSONC: match the values instead, so they survive the rewrite below.
+        # Not valid JSONC: match the key instead, so it survives the rewrite below.
         $Raw = [System.IO.File]::ReadAllText($ConfigPath, [System.Text.Encoding]::UTF8)
-        if ($Raw -match '"apiKey"\s*:\s*"([^"]+)"')                       { $ApiKey    = $Matches[1] }
-        if ($Raw -match '"--kb-repo"\s*,\s*"([^"]+)"')                    { $KbRepo    = $Matches[1] }
-        if ($Raw -match '"GITHUB_PERSONAL_ACCESS_TOKEN"\s*:\s*"([^"]+)"') { $NeuronPat = $Matches[1] }
+        if ($Raw -match '"apiKey"\s*:\s*"([^"]+)"') { $ApiKey = $Matches[1] }
     }
 }
 if ([string]::IsNullOrWhiteSpace($ApiKey)) {
@@ -308,60 +282,6 @@ if ([string]::IsNullOrWhiteSpace($ApiKey)) {
     $ApiKey = (Read-Host).Trim()
     if ([string]::IsNullOrWhiteSpace($ApiKey)) { Write-Fatal "API key cannot be empty." }
     Write-Host ""
-}
-
-# Project Brain - optional neusis-neuron MCP knowledge-base integration.
-# kb-repo is per-project, so this is an opt-in prompt; blank skips it entirely. A neusis-neuron entry the
-# installer cannot read the repo from (another flag form, or the repo set in its environment) is left alone.
-if ([string]::IsNullOrWhiteSpace($KbRepo) -and [string]::IsNullOrWhiteSpace($HasNeuron)) {
-    Write-Divider
-    Write-Host "  Project Brain " -ForegroundColor White -NoNewline
-    Write-Host "(optional)" -ForegroundColor DarkGray
-    Write-Host ""
-    Write-Host "  Connect a project-brain knowledge-base repo for richer context." -ForegroundColor DarkGray
-    Write-Host "  Leave blank to skip - you can add it to a project's" -ForegroundColor DarkGray
-    Write-Host "  .neusiscode\neusiscode.jsonc later." -ForegroundColor DarkGray
-    Write-Host ""
-    Write-Host "  KB repo (owner/repo) " -ForegroundColor DarkGray -NoNewline
-    Write-Host "$([char]0x25B8) " -ForegroundColor Cyan -NoNewline
-    $KbRepo = (Read-Host).Trim()
-    if (-not [string]::IsNullOrWhiteSpace($KbRepo)) {
-        Write-Host "  GitHub token (fine-grained PAT, Contents:Read) " -ForegroundColor DarkGray -NoNewline
-        Write-Host "$([char]0x25B8) " -ForegroundColor Cyan -NoNewline
-        $NeuronPat = (Read-Host).Trim()
-    }
-    Write-Host ""
-}
-
-# Install the neusis-neuron MCP server when project-brain is configured.
-# Runs in a child process so its strict-mode / encoding settings can't leak
-# into this script. The install dir is passed via the inherited INSTALL_DIR
-# env var rather than string-embedded, so profile paths containing an
-# apostrophe (e.g. C:\Users\O'Connor) still work. Non-fatal: a failure here
-# must not break the install. ErrorActionPreference is relaxed around the
-# call so native stderr isn't turned into a terminating error; both it and
-# INSTALL_DIR are restored in finally (this script may run in the user's
-# own session via irm | iex).
-if (-not [string]::IsNullOrWhiteSpace($KbRepo)) {
-    Write-Detail "Installing neusis-neuron-mcp ..."
-    $NeuronOk       = $false
-    $PrevInstallDir = $env:INSTALL_DIR
-    try {
-        $env:INSTALL_DIR       = $InstallDir
-        $ErrorActionPreference = 'Continue'
-        & powershell -NoProfile -ExecutionPolicy Bypass -Command "Invoke-RestMethod '$NeuronUrl' | Invoke-Expression" 2>&1 | Out-Null
-        $NeuronOk = ($LASTEXITCODE -eq 0)
-    } catch {
-        $NeuronOk = $false
-    } finally {
-        $ErrorActionPreference = 'Stop'
-        $env:INSTALL_DIR       = $PrevInstallDir
-    }
-    if ($NeuronOk) {
-        Write-Ok "neusis-neuron-mcp installed"
-    } else {
-        Write-Warn "neusis-neuron-mcp install failed - project-brain stays inactive until it is installed"
-    }
 }
 
 Write-Step "Configuration"; Write-Host ""
@@ -394,30 +314,12 @@ if ($null -ne $ConfigResult) {
     $Config += '  "registry": {' + $NL
     $Config += '    "repos": [{ "url": "https://github.com/Neusis-AI-Org/neusiscode-registry" }]' + $NL
     $Config += '  },' + $NL
-    $Config += '  "disabled_providers": ["opencode", "github-copilot"]'
-    if (-not [string]::IsNullOrWhiteSpace($KbRepo)) {
-        $Config += ',' + $NL
-        $Config += '  "mcp": {' + $NL
-        $Config += '    "neusis-neuron": {' + $NL
-        $Config += '      "type": "local",' + $NL
-        $Config += "      `"command`": [`"neusis-neuron-mcp`", `"stdio`", `"--kb-repo`", `"$KbRepo`"]," + $NL
-        if (-not [string]::IsNullOrWhiteSpace($NeuronPat)) {
-            $Config += "      `"environment`": { `"GITHUB_PERSONAL_ACCESS_TOKEN`": `"$NeuronPat`" }," + $NL
-        }
-        $Config += '      "enabled": true' + $NL
-        $Config += '    }' + $NL
-        $Config += '  }' + $NL
-    } else {
-        $Config += $NL
-    }
+    $Config += '  "disabled_providers": ["opencode", "github-copilot"]' + $NL
     $Config += '}'
     [System.IO.File]::WriteAllText($ConfigPath, $Config, (New-Object System.Text.UTF8Encoding $false))
     Write-Ok "Configuration saved"
 }
 Write-Detail $ConfigPath
-if (-not [string]::IsNullOrWhiteSpace($KbRepo)) {
-    Write-Detail "project-brain bound to $KbRepo (per-project override: .neusiscode\neusiscode.jsonc)"
-}
 
 # Done
 Write-Divider
